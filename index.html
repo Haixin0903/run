@@ -1,0 +1,1796 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>跳一跳</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #0f1114;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #e8eaed;
+    overflow: hidden;
+  }
+  #wrap {
+    position: relative;
+    width: 100%;
+    max-width: min(430px, calc(100vh * 9 / 16));
+    aspect-ratio: 9 / 16;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 18px;
+    background: linear-gradient(#262d36 0%, #39424c 55%, #1f242a 100%);
+    touch-action: manipulation;
+  }
+  #hint {
+    position: absolute;
+    bottom: 12px;
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 12px;
+    letter-spacing: .02em;
+    color: rgba(232,234,237,.4);
+    pointer-events: none;
+  }
+  #codeInput {
+    position: absolute;
+    z-index: 5;
+    border: 1px solid rgba(255,255,255,.18);
+    background: rgba(255,255,255,.08);
+    color: #e8eaed;
+    border-radius: 12px;
+    font-size: 16px;
+    padding: 0 16px;
+    margin: 0;
+    width: 1px;
+    height: 1px;
+    outline: none;
+    pointer-events: auto;
+  }
+  #codeInput::placeholder { color: rgba(232,234,237,.35); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <input id="codeInput" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" enterkeyhint="done" placeholder="请输入兑换码" />
+  <div id="hint">点击屏幕 / 空格 跳跃 · 空中可二段跳</div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const hintEl = document.getElementById('hint');
+const codeInput = document.getElementById('codeInput');
+const ctx = canvas.getContext('2d');
+
+// 逻辑分辨率，画面按比例缩放（9:16 竖版）
+const W = 405, H = 720;
+// 高分屏适配：画布物理像素按 DPR 放大，绘制仍用逻辑坐标，避免拉伸发糊
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+canvas.width = W * DPR;
+canvas.height = H * DPR;
+ctx.scale(DPR, DPR);
+
+// ---------- 状态 ----------
+const GROUND_Y = 630;
+const GRAVITY = 2400;
+const JUMP_V = -820;
+
+let state = 'splash'; // splash | ready | playing | paused | dead
+let splashTimer = 0;  // 开屏动画累计秒数
+let readyTime = 0;    // 主页停留累计秒数（标题漂浮动效用）
+const SPLASH_DUR = 1.5;
+const pauseBtn = { x: 0, y: 0, r: 19 };   // 右上角暂停按钮命中区
+const resumeBtn = { x: 0, y: 0, w: 150, h: 40 }; // 暂停卡片：继续
+const restartBtn = { x: 0, y: 0, w: 150, h: 40 }; // 暂停卡片：重开
+const pauseHomeBtn = { x: 0, y: 0, w: 150, h: 40 }; // 暂停卡片：返回主页
+const deadRestartBtn = { x: 0, y: 0, w: 120, h: 42 }; // 结束卡片：重新开始
+const deadHomeBtn = { x: 0, y: 0, w: 120, h: 42 };   // 结束卡片：返回主页
+const startBtn = { x: 0, y: 0, w: 200, h: 46 };      // 主页：开始游戏主按钮
+const skinBtn = { x: 0, y: 0, w: 104, h: 38 };       // 主页：皮肤页入口
+const mapBtn = { x: 0, y: 0, w: 104, h: 38 };         // 主页：地图页入口
+const shopBtn = { x: 0, y: 0, w: 104, h: 38 };       // 主页：商店入口
+const gearBtn = { x: 0, y: 0, w: 36, h: 36 };        // 主页右下角：设置齿轮
+const settingsBackBtn = { x: 0, y: 0, w: 150, h: 38 }; // 设置页：返回主页
+const redeemBtn = { x: 0, y: 0, w: 200, h: 40 };     // 设置页：兑换码
+const codeField = { x: 0, y: 0, w: 270, h: 44 };      // 兑换码输入框（对齐隐藏 input）
+const redeemConfirmBtn = { x: 0, y: 0, w: 120, h: 38 }; // 面板：确认
+const redeemCancelBtn = { x: 0, y: 0, w: 120, h: 38 };  // 面板：取消
+const skinBackBtn = { x: 0, y: 0, w: 150, h: 38 };   // 皮肤页：返回主页
+const mapBackBtn = { x: 0, y: 0, w: 150, h: 38 };    // 地图页：返回主页
+const shopBackBtn = { x: 0, y: 0, w: 150, h: 40 };   // 商店：返回主页
+const buyBtn = { x: 0, y: 0, w: 116, h: 38 };        // 商店：购买商品
+const skinSlots = []; // 皮肤页卡片命中区域 {x,y,w,h,index}
+const mapSlots = [];  // 地图页卡片命中区域 {x,y,w,h,index}
+let pressedBtn = null;  // 当前按下的矩形按钮 {ref, act}（按下反馈用）
+let pressedPause = false; // 暂停钮按下态
+let pressedDot = -1;   // 按下的皮肤圆点 index
+let score = 0;
+let coinScore = 0;    // 金币奖励分（独立累计，避免被距离分覆盖）
+let totalCoins = 0;   // 累计持有金币（跨局持久货币，用于后续购买皮肤/道具）
+try { totalCoins = Number(localStorage.getItem('runner_total_coins')) || 0; } catch (e) {}
+let best = 0;
+try { best = Number(localStorage.getItem('runner_best')) || 0; } catch (e) {}
+let speed = 360;       // 当前滚动速度 px/s
+let distance = 0;
+let spawnTimer = 0;
+let coinTimer = 0;
+let jumpHeld = false;  // 跳跃按键边沿判断，防止长按连跳
+let combo = 0;        // 连续吃金币数（连击）
+let comboTimer = 0;   // 连击剩余有效时间
+let lastMilestone = 0; // 已播报的分数里程碑（每 100 分一档）
+const COMBO_WINDOW = 2;   // 连击有效秒数
+const COMBO_MAX = 5;     // 倍率上限
+const MAX_LIVES = 3;      // 生命条数
+let lives = MAX_LIVES;    // 当前剩余生命
+let invuln = 0;           // 受击后无敌剩余秒数
+const INVULN_DUR = 1.5;   // 无敌时长（秒）
+
+// ---------- 玩家 ----------
+const player = {
+  x: 70, y: GROUND_Y, w: 34, h: 46,
+  vy: 0, onGround: true,
+  jumps: 0,           // 已用跳跃次数（0 地面 / 1 一段 / 2 二段）
+  runFrame: 0
+};
+
+// ---------- 皮肤（前两套免费，第三套商店付费） ----------
+const skins = [
+  { id: 'white', name: '云白', body: '#e8eaed', head: '#f5f6f7', shoe: '#3a4149', accent: '#d96c5f', price: 0 }, // 白色
+  { id: 'black', name: '墨黑', body: '#2b2f36', head: '#454c55', shoe: '#14161a', accent: '#f2c14e', price: 0 }, // 黑色
+  { id: 'green', name: '翠绿', body: '#2f5d43', head: '#3f7a57', shoe: '#14161a', accent: '#7fd6a0', price: 20 }  // 商店付费：绿色皮肤
+];
+let skinIndex = 0;
+const skinDots = []; // 记录圆点命中区域
+let owned = [];      // 已拥有的皮肤 id（免费皮肤天然拥有，付费皮肤购买后写入）
+try { owned = JSON.parse(localStorage.getItem('runner_owned')) || []; } catch (e) { owned = []; }
+
+// ---------- 地图（黑夜 / 白天免费，雨天 100 金币兑换） ----------
+const MAPS = [
+  { id: 'night', name: '黑夜', day: false, price: 0,
+    sky: ['#28303a', '#37404a', '#1e2329'], ground: ['#454e57', '#252a30'],
+    hill: 'rgba(255,255,255,.06)', cloud: 'rgba(255,255,255,.10)',
+    groundTop: '#5a6570', tick: 'rgba(255,255,255,.07)' },
+  { id: 'day', name: '白天', day: true, price: 0,
+    sky: ['#6ec3f0', '#bfe6f7', '#eef9ff'], ground: ['#7fb96a', '#57944a'],
+    hill: 'rgba(255,255,255,.30)', cloud: 'rgba(255,255,255,.9)',
+    groundTop: '#6aa857', tick: 'rgba(255,255,255,.20)' },
+  { id: 'rain', name: '雨天', day: false, rain: true, price: 100,
+    sky: ['#56616e', '#78848f', '#97a2ab'], ground: ['#46524c', '#2f3733'],
+    hill: 'rgba(255,255,255,.12)', cloud: 'rgba(80,90,100,.75)',
+    groundTop: '#5c6862', tick: 'rgba(255,255,255,.12)' }
+];
+let mapIndex = 0;
+try { mapIndex = Number(localStorage.getItem('runner_map')) || 0; } catch (e) {}
+if (mapIndex < 0 || mapIndex >= MAPS.length) mapIndex = 0;
+function persistMap() { try { localStorage.setItem('runner_map', String(mapIndex)); } catch (e) {} }
+
+// 已兑换的付费地图 id（免费地图天然拥有）
+let ownedMaps = [];
+try { ownedMaps = JSON.parse(localStorage.getItem('runner_maps')) || []; } catch (e) { ownedMaps = []; }
+function isMapOwned(i) {
+  const m = MAPS[i];
+  return !!m && (m.price === 0 || ownedMaps.indexOf(m.id) >= 0);
+}
+function persistOwnedMaps() { try { localStorage.setItem('runner_maps', JSON.stringify(ownedMaps)); } catch (e) {} }
+// 兜底：当前选中地图若未拥有（存档异常 / 付费地图被移除），回退到第一个已拥有地图
+if (!isMapOwned(mapIndex)) {
+  mapIndex = MAPS.findIndex((m, i) => isMapOwned(i));
+  if (mapIndex < 0) mapIndex = 0;
+  persistMap();
+}
+// 兜底：当前选中皮肤若未拥有（存档异常），回退到第一个已拥有皮肤
+if (!isOwned(skinIndex)) {
+  skinIndex = skins.findIndex((s, i) => isOwned(i));
+  if (skinIndex < 0) skinIndex = 0;
+}
+
+function isOwned(i) {
+  const s = skins[i];
+  return !!s && (s.price === 0 || owned.indexOf(s.id) >= 0);
+}
+function persistCoins() { try { localStorage.setItem('runner_total_coins', totalCoins); } catch (e) {} }
+function persistOwned() { try { localStorage.setItem('runner_owned', JSON.stringify(owned)); } catch (e) {} }
+
+// ---------- 兑换码（输入码发放金币，防重复兑换） ----------
+const REDEEM_CODES = { JUMP2026: 50, HELLO20: 20, '杨海鑫是神': 1000 };
+let redeemedCodes = [];
+try { redeemedCodes = JSON.parse(localStorage.getItem('runner_redeemed')) || []; } catch (e) { redeemedCodes = []; }
+function persistRedeemed() { try { localStorage.setItem('runner_redeemed', JSON.stringify(redeemedCodes)); } catch (e) {} }
+let redeemMsg = ''; // 设置页最近一次兑换结果提示
+function redeemCode(raw) {
+  const code = String(raw == null ? '' : raw).trim().toUpperCase();
+  if (!code) { redeemMsg = '请输入兑换码'; sfx.redeemFail(); return { ok: false, msg: redeemMsg }; }
+  if (redeemedCodes.indexOf(code) >= 0) { redeemMsg = '该兑换码已使用'; sfx.redeemFail(); return { ok: false, msg: redeemMsg }; }
+  if (!(code in REDEEM_CODES)) { redeemMsg = '兑换码无效'; sfx.redeemFail(); return { ok: false, msg: redeemMsg }; }
+  const reward = REDEEM_CODES[code];
+  totalCoins += reward;
+  redeemedCodes.push(code);
+  persistCoins();
+  persistRedeemed();
+  redeemMsg = '成功获得 ' + reward + ' 金币';
+  sfx.unlock();
+  return { ok: true, msg: redeemMsg };
+}
+
+// 兑换码面板：自绘浮层 + 真实透明 input 覆盖在输入框上，直接接收软键盘输入
+let redeemOpen = false;
+let redeemDraft = '';
+codeInput.addEventListener('input', () => { redeemDraft = codeInput.value; });
+codeInput.addEventListener('click', () => { codeInput.focus({ preventScroll: true }); });
+function placeCodeInput() {
+  // input 对齐到 canvas 输入框（逻辑坐标 → 容器百分比），撑开成可聚焦尺寸
+  codeInput.style.left = (codeField.x / W * 100) + '%';
+  codeInput.style.top = (codeField.y / H * 100) + '%';
+  codeInput.style.width = (codeField.w / W * 100) + '%';
+  codeInput.style.height = (codeField.h / H * 100) + '%';
+}
+function openRedeemPanel() {
+  redeemOpen = true;
+  redeemDraft = codeInput.value = '';
+  // 按面板固定几何先把输入框撑开定位，避免首次打开时仍是 1px 元素导致无法聚焦
+  const ph = 210, py = H / 2 - ph / 2;
+  codeField.w = 270; codeField.h = 44;
+  codeField.x = W / 2 - 135; codeField.y = py + 62;
+  placeCodeInput();
+  // 在用户手势内同步聚焦；部分 webview 需要可见、可点、有尺寸的输入框才会唤起键盘
+  codeInput.focus({ preventScroll: true });
+  requestAnimationFrame(() => codeInput.focus({ preventScroll: true }));
+}
+function closeRedeemPanel() {
+  redeemOpen = false;
+  codeInput.value = '';
+  redeemDraft = '';
+  codeInput.blur();
+  codeInput.style.width = '1px';
+  codeInput.style.height = '1px';
+}
+function submitRedeem() {
+  redeemCode(codeInput.value);
+  closeRedeemPanel();
+}
+
+// 商店售卖的绿色皮肤在 skins 中的下标
+const SHOP_SKIN_INDEX = 2;
+function buySkin(i) {
+  const s = skins[i];
+  if (!s || isOwned(i)) return;
+  if (totalCoins < s.price) return; // 金币不足：按钮置灰，不扣款
+  totalCoins -= s.price;
+  owned.push(s.id);
+  skinIndex = i; // 购买后自动装备
+  persistCoins();
+  persistOwned();
+  sfx.unlock();
+}
+function buyMap(i) {
+  const m = MAPS[i];
+  if (!m || isMapOwned(i)) return;
+  if (totalCoins < m.price) return; // 金币不足：不扣款
+  totalCoins -= m.price;
+  ownedMaps.push(m.id);
+  mapIndex = i; // 兑换后自动装备
+  persistCoins();
+  persistOwnedMaps();
+  persistMap();
+  sfx.unlock();
+}
+
+// ---------- 音效（Web Audio 合成，无外部素材） ----------
+let audioCtx = null;
+function warmUp() {
+  // 首次手势里播放一个近静音短音，预热音频管线，避免第一声延迟
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  g.gain.value = 0.0001;
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.03);
+}
+function ensureAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+    warmUp();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(() => {});
+  }
+}
+function tone(freq, dur, type = 'square', vol = 0.15, slideTo = null, delay = 0) {
+  if (!audioCtx) return;
+  // 上下文未解锁时再次唤醒；不要直接丢弃，否则挂起期间的音效会全程失声
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  const t0 = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  gain.gain.setValueAtTime(vol, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.02);
+}
+const sfx = {
+  jump() { tone(300, 0.1, 'square', 0.12, 580); },
+  doubleJump() { tone(420, 0.11, 'square', 0.11, 780); },
+  coin() { tone(880, 0.07, 'triangle', 0.15); tone(1320, 0.09, 'triangle', 0.15, null, 0.07); },
+  hurt() { tone(220, 0.15, 'sawtooth', 0.14, 90); },
+  die()  { tone(300, 0.3, 'sawtooth', 0.16, 70); },
+  // 通用 UI 轻音
+  click() { tone(600, 0.05, 'triangle', 0.08); },
+  start() { tone(440, 0.09, 'square', 0.12); tone(660, 0.12, 'square', 0.12, null, 0.09); },
+  pause() { tone(500, 0.1, 'triangle', 0.1, 260); },
+  resume() { tone(300, 0.1, 'triangle', 0.1, 520); },
+  back() { tone(400, 0.07, 'triangle', 0.08, 260); },
+  // 解锁 / 兑换成功琶音
+  unlock() { tone(660, 0.08, 'triangle', 0.14); tone(880, 0.08, 'triangle', 0.14, null, 0.08); tone(1100, 0.12, 'triangle', 0.14, null, 0.16); },
+  redeemFail() { tone(220, 0.12, 'sawtooth', 0.1, 160); tone(160, 0.14, 'sawtooth', 0.09, 120, 0.1); },
+  land() { tone(180, 0.05, 'sine', 0.07, 120); },
+  combo(n) { tone(520 + Math.min(n, 10) * 40, 0.06, 'triangle', 0.1); },
+  // 空跳 / 不可操作的低沉拒绝音
+  deny() { tone(160, 0.08, 'square', 0.08, 120); },
+  // 破纪录上行号角
+  record() { tone(523, 0.1, 'triangle', 0.15); tone(659, 0.1, 'triangle', 0.15, null, 0.1); tone(784, 0.1, 'triangle', 0.15, null, 0.2); tone(1047, 0.18, 'triangle', 0.16, null, 0.3); },
+  // 分数里程碑上扬双音
+  milestone() { tone(700, 0.07, 'triangle', 0.12); tone(1000, 0.1, 'triangle', 0.12, null, 0.07); },
+  // 残血警示两短音
+  warning() { tone(330, 0.09, 'sawtooth', 0.1); tone(330, 0.09, 'sawtooth', 0.1, null, 0.12); },
+  // 进入子页面轻音
+  pageIn() { tone(500, 0.06, 'triangle', 0.09, 700); },
+  // 连击中断低音
+  comboBreak() { tone(300, 0.1, 'sine', 0.08, 150); }
+};
+
+// ---------- 世界元素 ----------
+let obstacles = [];  // 障碍物
+let coins = [];      // 金币
+let clouds = [];     // 远景云
+let hills = [];      // 远景山丘
+let rains = [];     // 雨天雨丝
+const pBox = { x: 0, y: 0, w: 0, h: 0 }; // 玩家碰撞盒（复用，避免每帧分配）
+const coinBox = { x: 0, y: 0, w: 0, h: 0 }; // 金币碰撞盒（复用）
+
+function initScenery() {
+  clouds = [
+    { x: 80, y: 110, s: 1.0 },
+    { x: 240, y: 180, s: 0.7 },
+    { x: 340, y: 80, s: 0.85 }
+  ];
+  hills = [
+    { x: -40, w: 220, h: 110 },
+    { x: 180, w: 240, h: 150 },
+    { x: 420, w: 220, h: 100 }
+  ];
+  rains = [];
+  for (let k = 0; k < 28; k++) {
+    rains.push({ x: Math.random() * W, y: Math.random() * GROUND_Y, len: 12 + Math.random() * 10, spd: 260 + Math.random() * 120 });
+  }
+}
+
+// ---------- 工具 ----------
+function reset() {
+  state = 'ready';
+  score = 0;
+  coinScore = 0;
+  combo = 0;
+  comboTimer = 0;
+  lastMilestone = 0;
+  lives = MAX_LIVES;
+  invuln = 0;
+  speed = 360;
+  distance = 0;
+  spawnTimer = 0.8;
+  coinTimer = 1.4;
+  obstacles = [];
+  coins = [];
+  player.y = GROUND_Y;
+  player.vy = 0;
+  player.onGround = true;
+  player.jumps = 0;
+  jumpHeld = false;
+  pressedBtn = null;
+  pressedPause = false;
+  pressedDot = -1;
+  readyTime = 0;
+  initScenery();
+}
+
+function startGame() {
+  state = 'playing';
+  sfx.start();
+}
+
+function pauseGame() {
+  if (state === 'playing') {
+    state = 'paused';
+    pressedPause = false;
+    pressedBtn = null;
+    sfx.pause();
+  }
+}
+
+function resumeGame() {
+  if (state === 'paused') {
+    state = 'playing';
+    pressedBtn = null;
+    sfx.resume();
+  }
+}
+
+function jump() {
+  // 仅在对局中响应跳跃；主页 / 暂停 / 结束 / 商店均由对应按钮驱动，避免误触开局
+  if (state !== 'playing') return;
+  // 一段跳：在地面起跳
+  if (player.onGround) {
+    player.vy = JUMP_V;
+    player.onGround = false;
+    player.jumps = 1;
+    sfx.jump();
+  }
+  // 二段跳：空中还能再跳一次，力度略弱
+  else if (player.jumps < 2) {
+    player.vy = JUMP_V * 0.9;
+    player.jumps = 2;
+    sfx.doubleJump();
+  }
+  // 已无跳跃次数：低沉拒绝音提示
+  else {
+    sfx.deny();
+  }
+}
+
+// 输入：键盘 + 触屏（边沿触发，长按不会重复跳跃）
+document.addEventListener('keydown', e => {
+  // 兑换码面板打开：回车确认 / Esc 取消，且不触发游戏跳跃
+  if (redeemOpen) {
+    if (e.code === 'Enter') { e.preventDefault(); submitRedeem(); }
+    else if (e.code === 'Escape') { e.preventDefault(); closeRedeemPanel(); }
+    return;
+  }
+  if (e.code === 'KeyP' || e.code === 'Escape') {
+    if (state === 'playing') pauseGame();
+    else if (state === 'paused') resumeGame();
+    return;
+  }
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    e.preventDefault();
+    ensureAudio();
+    if (!jumpHeld) {
+      jumpHeld = true;
+      jump();
+    }
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    jumpHeld = false;
+  }
+});
+// 触屏抬起 / 中断时同样复位跳跃状态，避免卡在长按态
+function clearPress() { jumpHeld = false; pressedBtn = null; pressedPause = false; pressedDot = -1; }
+canvas.addEventListener('pointerup', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = ((e.clientX - rect.left) / rect.width) * W;
+  const my = ((e.clientY - rect.top) / rect.height) * H;
+  // 矩形按钮：松手时仍在按钮内才触发动作
+  if (pressedBtn) {
+    if (inRect(mx, my, pressedBtn.ref)) {
+      const act = pressedBtn.act;
+      // UI 音效：返回类用轻回落音；购买/兑换成功走专属解锁音，其余按钮用轻点击音
+      if (act === 'shopBack' || act === 'skinBack' || act === 'mapBack' || act === 'settingsBack' || act === 'home') sfx.back();
+      else if (act === 'shop' || act === 'skins' || act === 'maps' || act === 'settings' || act === 'toShop') sfx.pageIn();
+      else if (act !== 'buy' && act !== 'buyMap' && act !== 'redeemConfirm') sfx.click();
+      if (act === 'resume') resumeGame();
+      else if (act === 'start') startGame();
+      else if (act === 'restart') { reset(); startGame(); }
+      else if (act === 'home') reset();
+      else if (act === 'shop') state = 'shop';
+      else if (act === 'shopBack') state = 'ready';
+      else if (act === 'buy') buySkin(SHOP_SKIN_INDEX);
+      else if (act === 'skins') state = 'skins';
+      else if (act === 'skinBack') state = 'ready';
+      else if (act === 'toShop') state = 'shop';
+      else if (act === 'pickSkin') skinIndex = pressedBtn.index;
+      else if (act === 'maps') state = 'maps';
+      else if (act === 'mapBack') state = 'ready';
+      else if (act === 'pickMap') { mapIndex = pressedBtn.index; persistMap(); }
+      else if (act === 'buyMap') buyMap(pressedBtn.index);
+      else if (act === 'settings') state = 'settings';
+      else if (act === 'settingsBack') { closeRedeemPanel(); state = 'ready'; }
+      else if (act === 'redeem') { if (!redeemOpen) openRedeemPanel(); else codeInput.focus({ preventScroll: true }); }
+      else if (act === 'redeemConfirm') submitRedeem();
+      else if (act === 'redeemCancel') closeRedeemPanel();
+    }
+    pressedBtn = null;
+    return;
+  }
+  // 暂停钮
+  if (pressedPause) {
+    if (Math.hypot(mx - pauseBtn.x, my - pauseBtn.y) <= pauseBtn.r) pauseGame();
+    pressedPause = false;
+    return;
+  }
+  // 皮肤圆点
+  if (pressedDot >= 0) {
+    const d = skinDots[pressedDot];
+    if (d && isOwned(d.index) && Math.hypot(mx - d.x, my - d.y) <= d.r + 8) { skinIndex = d.index; sfx.click(); }
+    pressedDot = -1;
+    return;
+  }
+  jumpHeld = false;
+});
+canvas.addEventListener('pointercancel', clearPress);
+canvas.addEventListener('touchstart', e => { ensureAudio(); }, { passive: true });
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  ensureAudio();
+  const rect = canvas.getBoundingClientRect();
+  // 归一化到逻辑坐标（不能用 canvas.width，否则高分屏会多乘 DPR 导致命中偏移）
+  const mx = ((e.clientX - rect.left) / rect.width) * W;
+  const my = ((e.clientY - rect.top) / rect.height) * H;
+  // 开屏：点击跳过，直接进入开始界面
+  if (state === 'splash') { state = 'ready'; return; }
+  // 按钮类：只记录按下态，动作在 pointerup 触发，保证按下反馈可见
+  if (state === 'playing') {
+    if (Math.hypot(mx - pauseBtn.x, my - pauseBtn.y) <= pauseBtn.r) {
+      pressedPause = true;
+      return;
+    }
+  }
+  if (state === 'paused') {
+    if (inRect(mx, my, resumeBtn)) { pressedBtn = { ref: resumeBtn, act: 'resume' }; return; }
+    if (inRect(mx, my, restartBtn)) { pressedBtn = { ref: restartBtn, act: 'restart' }; return; }
+    if (inRect(mx, my, pauseHomeBtn)) { pressedBtn = { ref: pauseHomeBtn, act: 'home' }; return; }
+    return;
+  }
+  if (state === 'dead') {
+    if (inRect(mx, my, deadRestartBtn)) { pressedBtn = { ref: deadRestartBtn, act: 'restart' }; return; }
+    if (inRect(mx, my, deadHomeBtn)) { pressedBtn = { ref: deadHomeBtn, act: 'home' }; return; }
+    return;
+  }
+  // 商店界面：返回主页 / 购买商品
+  if (state === 'shop') {
+    if (inRect(mx, my, shopBackBtn)) { pressedBtn = { ref: shopBackBtn, act: 'shopBack' }; return; }
+    if (inRect(mx, my, buyBtn)) { pressedBtn = { ref: buyBtn, act: 'buy' }; return; }
+    return;
+  }
+  // 皮肤选择页：返回主页 / 点选已拥有皮肤 / 未拥有跳转商店
+  if (state === 'skins') {
+    if (inRect(mx, my, skinBackBtn)) { pressedBtn = { ref: skinBackBtn, act: 'skinBack' }; return; }
+    for (const slot of skinSlots) {
+      if (inRect(mx, my, slot)) {
+        if (isOwned(slot.index)) pressedBtn = { ref: slot, act: 'pickSkin', index: slot.index };
+        else pressedBtn = { ref: slot, act: 'toShop' };
+        return;
+      }
+    }
+    return;
+  }
+  // 地图选择页：返回主页 / 点选已拥有地图 / 兑换付费地图 / 不足跳转商店
+  if (state === 'maps') {
+    if (inRect(mx, my, mapBackBtn)) { pressedBtn = { ref: mapBackBtn, act: 'mapBack' }; return; }
+    for (const slot of mapSlots) {
+      if (inRect(mx, my, slot)) {
+        if (isMapOwned(slot.index)) pressedBtn = { ref: slot, act: 'pickMap', index: slot.index };
+        else if (totalCoins >= MAPS[slot.index].price) pressedBtn = { ref: slot, act: 'buyMap', index: slot.index };
+        else pressedBtn = { ref: slot, act: 'toShop' };
+        return;
+      }
+    }
+    return;
+  }
+  // 设置页：面板打开时优先确认/取消；否则返回主页 / 兑换码
+  if (state === 'settings') {
+    if (redeemOpen) {
+      if (inRect(mx, my, redeemConfirmBtn)) { pressedBtn = { ref: redeemConfirmBtn, act: 'redeemConfirm' }; return; }
+      if (inRect(mx, my, redeemCancelBtn)) { pressedBtn = { ref: redeemCancelBtn, act: 'redeemCancel' }; return; }
+      return;
+    }
+    if (inRect(mx, my, settingsBackBtn)) { pressedBtn = { ref: settingsBackBtn, act: 'settingsBack' }; return; }
+    if (inRect(mx, my, redeemBtn)) {
+      pressedBtn = { ref: redeemBtn, act: 'redeem' };
+      openRedeemPanel(); // 在 pointerdown 手势同步栈内聚焦，提高键盘唤起成功率
+      return;
+    }
+    return;
+  }
+  // ready 界面：开始主按钮 > 皮肤 > 地图 > 商店；点卡片空白不开局，避免误触
+  if (state === 'ready') {
+    if (inRect(mx, my, startBtn)) { pressedBtn = { ref: startBtn, act: 'start' }; return; }
+    if (inRect(mx, my, skinBtn)) { pressedBtn = { ref: skinBtn, act: 'skins' }; return; }
+    if (inRect(mx, my, mapBtn)) { pressedBtn = { ref: mapBtn, act: 'maps' }; return; }
+    if (inRect(mx, my, shopBtn)) { pressedBtn = { ref: shopBtn, act: 'shop' }; return; }
+    if (inRect(mx, my, gearBtn)) { pressedBtn = { ref: gearBtn, act: 'settings' }; return; }
+    return;
+  }
+  jump();
+});
+
+// ---------- 生成 ----------
+function spawnObstacle() {
+  // 两种障碍：矮块（必须跳）、高柱（必须早跳）
+  const type = Math.random() < 0.75 ? 'block' : 'pillar';
+  if (type === 'block') {
+    const h = 34 + Math.random() * 14;
+    obstacles.push({ x: W + 40, y: GROUND_Y - h, w: 30, h, type });
+  } else {
+    obstacles.push({ x: W + 40, y: GROUND_Y - 64, w: 26, h: 64, type });
+  }
+}
+
+function spawnCoin() {
+  // 高度限制在跳跃可达范围（离地 60~140px）
+  const y = GROUND_Y - 60 - Math.random() * 80;
+  coins.push({ x: W + 20, y, r: 12, collected: false, spin: Math.random() * Math.PI * 2 });
+}
+
+// ---------- 碰撞 ----------
+function overlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function inRect(mx, my, r) {
+  return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+}
+
+// ---------- 绘制辅助 ----------
+// 背景渐变恒定，模块级缓存，避免每帧 createLinearGradient 分配
+const skyGrads = [], groundGrads = [];
+function getSkyGrad() {
+  if (!skyGrads[mapIndex]) {
+    const m = MAPS[mapIndex];
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, m.sky[0]);
+    g.addColorStop(0.55, m.sky[1]);
+    g.addColorStop(1, m.sky[2]);
+    skyGrads[mapIndex] = g;
+  }
+  return skyGrads[mapIndex];
+}
+function getGroundGrad() {
+  if (!groundGrads[mapIndex]) {
+    const m = MAPS[mapIndex];
+    const g = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+    g.addColorStop(0, m.ground[0]);
+    g.addColorStop(1, m.ground[1]);
+    groundGrads[mapIndex] = g;
+  }
+  return groundGrads[mapIndex];
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// ---------- 更新 ----------
+let last = 0;
+function loop(t) {
+  const dt = Math.min((t - last) / 1000, 0.033);
+  last = t;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+// 切回前台时重置时间基准，避免回前台瞬间出现大 dt
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) last = performance.now();
+});
+
+function update(dt) {
+  // 远景滚动：游戏中随速度，暂停时静止，其余界面缓慢漂移
+  const bgSpeed = state === 'playing' ? speed * 0.25 : state === 'paused' ? 0 : 60;
+  clouds.forEach(c => { c.x -= bgSpeed * 0.4 * dt; if (c.x < -80) c.x = W + 60; });
+  hills.forEach(h => { h.x -= bgSpeed * dt; if (h.x + h.w < -20) h.x = W + 20; });
+  rains.forEach(r => {
+    r.y += r.spd * dt;
+    r.x -= 60 * dt;
+    if (r.y > GROUND_Y) { r.y = -10; r.x = Math.random() * W; }
+  });
+
+  // 开屏：极简淡入放大，到时进入开始界面；不跑玩法逻辑
+  if (state === 'splash') {
+    splashTimer += dt;
+    if (splashTimer >= SPLASH_DUR) state = 'ready';
+    return;
+  }
+
+  // 主页：累计停留时间，驱动标题漂浮呼吸动效
+  if (state === 'ready') { readyTime += dt; return; }
+
+  if (state !== 'playing') return;
+
+  // 难度：随时间加速，设上限避免速度失控
+  speed = Math.min(speed + 6 * dt, 720);
+  distance += speed * dt;
+  score = Math.floor(distance / 40) + coinScore;
+
+  // 每越过 100 分播报一次里程碑
+  const ms = Math.floor(score / 100);
+  if (ms > lastMilestone) { lastMilestone = ms; sfx.milestone(); }
+
+  // 连击倒计时：超时未吃金币则连击清零
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) { if (combo > 0) sfx.comboBreak(); combo = 0; }
+  }
+
+  // 受击无敌计时
+  if (invuln > 0) invuln -= dt;
+
+  // 玩家物理
+  player.vy += GRAVITY * dt;
+  player.y += player.vy * dt;
+  if (player.y >= GROUND_Y) {
+    if (!player.onGround && player.vy > 0) sfx.land();
+    player.y = GROUND_Y;
+    player.vy = 0;
+    player.onGround = true;
+    player.jumps = 0;
+  }
+  player.runFrame += dt * 12;
+
+  // 生成障碍 / 金币
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnObstacle();
+    const gap = Math.max(0.9, 1.6 - speed / 500);
+    spawnTimer = gap + Math.random() * 0.6;
+  }
+  coinTimer -= dt;
+  if (coinTimer <= 0) {
+    spawnCoin();
+    coinTimer = 1.2 + Math.random() * 1.2;
+  }
+
+  // 移动世界元素，并原地回收出屏 / 已收集对象（避免每帧 filter 分配新数组）
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    obstacles[i].x -= speed * dt;
+    if (obstacles[i].x + obstacles[i].w <= -20) obstacles.splice(i, 1);
+  }
+  for (let i = coins.length - 1; i >= 0; i--) {
+    const c = coins[i];
+    if (!c.collected) c.x -= speed * dt;
+    c.spin += dt * 5;
+    if (c.x <= -30 || c.collected) coins.splice(i, 1);
+  }
+
+  // 碰撞：障碍（无敌期间不判定；扣一条命并短暂无敌，命尽才结束）
+  pBox.x = player.x + 4;
+  pBox.y = player.y - player.h + 4;
+  pBox.w = player.w - 8;
+  pBox.h = player.h - 4;
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const o = obstacles[i];
+    if (invuln > 0) break; // 无敌中，跳过全部障碍判定
+    if (overlap(pBox, o)) {
+      lives--;
+      if (lives <= 0) {
+        state = 'dead';
+        const newRecord = score > best;
+        sfx.die();
+        if (newRecord) {
+          best = score;
+          try { localStorage.setItem('runner_best', best); } catch (e) {}
+          sfx.record();
+        }
+        try { localStorage.setItem('runner_total_coins', totalCoins); } catch (e) {}
+        break;
+      }
+      // 未殒命：进入无敌，移除撞上的障碍，避免叠在身上反复扣血
+      invuln = INVULN_DUR;
+      sfx.hurt();
+      if (lives === 1) sfx.warning(); // 仅剩一条命：警示音
+      obstacles.splice(i, 1);
+    }
+  }
+  // 已在本帧殒命，不再结算金币
+  if (state === 'dead') return;
+  // 碰撞：金币（连击倍率）
+  for (const c of coins) {
+    coinBox.x = c.x - c.r;
+    coinBox.y = c.y - c.r;
+    coinBox.w = c.r * 2;
+    coinBox.h = c.r * 2;
+    if (!c.collected && overlap(pBox, coinBox)) {
+      c.collected = true;
+      combo++;
+      comboTimer = COMBO_WINDOW;
+      const mult = Math.min(combo, COMBO_MAX);
+      coinScore += 1 * mult;
+      totalCoins += 1;
+      try { localStorage.setItem('runner_total_coins', totalCoins); } catch (e) {}
+      sfx.coin();
+      if (combo >= 3) sfx.combo(combo);
+    }
+  }
+}
+
+// ---------- 绘制 ----------
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // 分层天空渐变（按当前地图缓存）
+  const map = MAPS[mapIndex];
+  ctx.fillStyle = getSkyGrad();
+  ctx.fillRect(0, 0, W, H);
+
+  // 白天：右上角太阳 + 光晕
+  if (map.day) {
+    ctx.fillStyle = 'rgba(255,236,150,.35)';
+    ctx.beginPath();
+    ctx.arc(W - 84, 92, 34, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffd95e';
+    ctx.beginPath();
+    ctx.arc(W - 84, 92, 22, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 远山（柔和半透明三角）
+  ctx.fillStyle = map.hill;
+  hills.forEach(h => {
+    ctx.beginPath();
+    ctx.moveTo(h.x, GROUND_Y);
+    ctx.lineTo(h.x + h.w / 2, GROUND_Y - h.h);
+    ctx.lineTo(h.x + h.w, GROUND_Y);
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  // 云
+  ctx.fillStyle = map.cloud;
+  clouds.forEach(c => {
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 18 * c.s, 0, Math.PI * 2);
+    ctx.arc(c.x + 22 * c.s, c.y + 4 * c.s, 14 * c.s, 0, Math.PI * 2);
+    ctx.arc(c.x - 22 * c.s, c.y + 5 * c.s, 13 * c.s, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // 雨天：斜向雨丝
+  if (map.rain) {
+    ctx.strokeStyle = 'rgba(220,230,235,.35)';
+    ctx.lineWidth = 1.2;
+    rains.forEach(r => {
+      ctx.beginPath();
+      ctx.moveTo(r.x, r.y);
+      ctx.lineTo(r.x - 4, r.y + r.len);
+      ctx.stroke();
+    });
+  }
+
+  // 地面（纵向渐变，按当前地图缓存）
+  ctx.fillStyle = getGroundGrad();
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.fillStyle = map.groundTop;
+  ctx.fillRect(0, GROUND_Y, W, 6);
+
+  // 地面滚动刻度
+  ctx.fillStyle = map.tick;
+  const tickGap = 60;
+  const offset = (distance % tickGap);
+  for (let x = -offset; x < W; x += tickGap) {
+    ctx.fillRect(x, GROUND_Y + 18, 24, 4);
+  }
+
+  // 金币（翻面转动的金属硬币：光晕 + 币体 + 外缘 + 内圈 + 中央菱形 + 高光）
+  coins.forEach(c => {
+    if (c.collected) return;
+    const flip = Math.abs(Math.cos(c.spin));
+    const rx = c.r * (0.35 + 0.65 * flip);
+
+    // 外圈光晕
+    ctx.fillStyle = 'rgba(242,193,78,.15)';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, c.r + 5, c.r + 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 币体
+    ctx.fillStyle = '#f2c14e';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, rx, c.r, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 外缘描边
+    ctx.strokeStyle = '#c98f22';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, rx, c.r, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 内圈
+    ctx.strokeStyle = 'rgba(184,127,28,.55)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, rx * 0.6, c.r * 0.6, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 中央菱形
+    ctx.fillStyle = '#b87f1c';
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillRect(-c.r * 0.22, -c.r * 0.22, c.r * 0.44, c.r * 0.44);
+    ctx.restore();
+
+    // 左上高光
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    ctx.beginPath();
+    ctx.ellipse(c.x - rx * 0.3, c.y - c.r * 0.35, rx * 0.22, c.r * 0.16, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // 障碍（主体 + 顶部高光 + 底部暗部）
+  obstacles.forEach(o => {
+    ctx.fillStyle = '#cf6a5e';
+    roundRect(o.x, o.y, o.w, o.h, 6);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.14)';
+    roundRect(o.x + 3, o.y + 3, o.w - 6, 6, 3);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,.20)';
+    roundRect(o.x + 3, o.y + o.h - 8, o.w - 6, 5, 3);
+    ctx.fill();
+  });
+
+  // 玩家落地投影（随离地高度变淡变小）
+  const air = Math.max(0, GROUND_Y - player.y);
+  const shadowScale = Math.max(0.45, 1 - air / 220);
+  ctx.fillStyle = 'rgba(0,0,0,' + (0.28 * shadowScale).toFixed(3) + ')';
+  ctx.beginPath();
+  ctx.ellipse(player.x + player.w / 2, GROUND_Y + 12, 17 * shadowScale, 5 * shadowScale, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 玩家（简约方块小人）
+  drawPlayer();
+
+  // HUD：顶部药丸标签（游戏中 / 暂停时显示）
+  if (state === 'playing' || state === 'paused') {
+    drawHudPill(16, '得分', score);
+    drawHudPill(229, '最佳', best);
+    drawLives();
+    drawCoinCount();
+    if (combo >= 2) drawComboBadge(Math.min(combo, COMBO_MAX));
+  }
+  if (state === 'playing') drawPauseButton();
+
+  // 状态遮罩
+  if (state === 'splash') {
+    drawSplash();
+  } else if (state === 'ready') {
+    drawReadyOverlay();
+  } else if (state === 'dead') {
+    drawDeadOverlay();
+  } else if (state === 'paused') {
+    drawPausedOverlay();
+  } else if (state === 'shop') {
+    drawShopOverlay();
+  } else if (state === 'skins') {
+    drawSkinsOverlay();
+  } else if (state === 'maps') {
+    drawMapsOverlay();
+  } else if (state === 'settings') {
+    drawSettingsOverlay();
+  }
+
+  // 游戏进行中隐藏底部提示，避免遮挡跑道
+  if (hintEl && hintEl.style) hintEl.style.opacity = state === 'playing' ? '0' : '.4';
+}
+
+function drawHudPill(x, label, value) {
+  const w = 112, h = 46;
+  ctx.fillStyle = 'rgba(22,25,30,.55)';
+  roundRect(x, 16, w, h, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.10)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(232,234,237,.5)';
+  ctx.font = '500 11px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(label, x + 14, 33);
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '700 20px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(String(value), x + 14, 51);
+}
+
+function drawComboBadge(mult) {
+  const w = 76, h = 30, x = W / 2 - w / 2, y = 68;
+  ctx.fillStyle = 'rgba(18,20,24,.48)';
+  roundRect(x, y, w, h, 12);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(242,193,78,.45)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f2c14e';
+  ctx.font = '700 15px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('x' + mult, W / 2, y + 20);
+}
+
+function drawLives() {
+  const cy = 80, r = 6, gap = 18;
+  const startX = 16 + 14;
+  for (let i = 0; i < MAX_LIVES; i++) {
+    const x = startX + i * gap;
+    if (i < lives) {
+      ctx.fillStyle = '#d96c5f';
+      ctx.beginPath();
+      ctx.arc(x, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,.18)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawCoinCount() {
+  const cy = 108;                 // 生命圆点（y=80）下方，左缘对齐
+  const iconX = 16 + 14;
+  const iconR = 7;
+  // 外圈淡金光晕
+  ctx.fillStyle = 'rgba(242,193,78,.15)';
+  ctx.beginPath();
+  ctx.arc(iconX, cy, iconR + 3, 0, Math.PI * 2);
+  ctx.fill();
+  // 币体
+  ctx.fillStyle = '#f2c14e';
+  ctx.beginPath();
+  ctx.arc(iconX, cy, iconR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#c98f22';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // 内圈
+  ctx.strokeStyle = 'rgba(184,127,28,.55)';
+  ctx.beginPath();
+  ctx.arc(iconX, cy, iconR * 0.55, 0, Math.PI * 2);
+  ctx.stroke();
+  // 左上高光
+  ctx.fillStyle = 'rgba(255,255,255,.5)';
+  ctx.beginPath();
+  ctx.arc(iconX - 2, cy - 2, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  // 数量
+  const label = String(totalCoins);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f5f6f7';
+  ctx.font = '700 14px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(label, iconX + iconR + 6, cy + 5);
+}
+
+function drawPauseButton() {
+  const cx = W - 16 - 19, cy = 39;
+  pauseBtn.x = cx;
+  pauseBtn.y = cy;
+  const r = pressedPause ? 17 : 19;
+  ctx.fillStyle = pressedPause ? 'rgba(35,40,47,.72)' : 'rgba(22,25,30,.55)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.10)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = '#e8eaed';
+  ctx.fillRect(cx - 6, cy - 7, 4, 14);
+  ctx.fillRect(cx + 2, cy - 7, 4, 14);
+}
+
+function drawButton(btn, label, filled) {
+  const isDown = pressedBtn && pressedBtn.ref === btn;
+  const dy = isDown ? 1 : 0;
+  if (filled) {
+    ctx.fillStyle = isDown ? 'rgba(255,255,255,.22)' : 'rgba(255,255,255,.14)';
+    roundRect(btn.x, btn.y + dy, btn.w, btn.h, 12);
+    ctx.fill();
+  } else {
+    if (isDown) {
+      ctx.fillStyle = 'rgba(255,255,255,.10)';
+      roundRect(btn.x, btn.y + dy, btn.w, btn.h, 12);
+      ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,.14)';
+    ctx.lineWidth = 1;
+    roundRect(btn.x, btn.y + dy, btn.w, btn.h, 12);
+    ctx.stroke();
+  }
+  ctx.textAlign = 'center';
+  ctx.fillStyle = filled ? '#e8eaed' : 'rgba(232,234,237,.6)';
+  ctx.font = '600 15px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(label, btn.x + btn.w / 2, btn.y + dy + btn.h / 2 + 5);
+}
+
+function drawPausedOverlay() {
+  drawBackdrop();
+  const ch = 296;
+  const cy = drawCard(ch);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '700 26px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('已暂停', W / 2, cy + 50);
+  ctx.fillStyle = 'rgba(232,234,237,.5)';
+  ctx.font = '500 14px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('得分 ' + score, W / 2, cy + 86);
+
+  resumeBtn.w = 150; resumeBtn.h = 40;
+  resumeBtn.x = W / 2 - 75; resumeBtn.y = cy + 112;
+  restartBtn.w = 150; restartBtn.h = 40;
+  restartBtn.x = W / 2 - 75; restartBtn.y = cy + 162;
+  pauseHomeBtn.w = 150; pauseHomeBtn.h = 40;
+  pauseHomeBtn.x = W / 2 - 75; pauseHomeBtn.y = cy + 212;
+  drawButton(resumeBtn, '继续', true);
+  drawButton(restartBtn, '重新开始', false);
+  drawButton(pauseHomeBtn, '返回主页', false);
+}
+
+function drawBackdrop() {
+  ctx.fillStyle = 'rgba(15,17,20,.45)';
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawCard(ch) {
+  const cw = W - 64;
+  const cx = 32;
+  const cy = H / 2 - ch / 2;
+  ctx.fillStyle = 'rgba(255,255,255,.08)';
+  roundRect(cx, cy, cw, ch, 24);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.12)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  return cy;
+}
+
+function drawSplash() {
+  // 加深背景，让开屏标题更聚焦
+  ctx.fillStyle = 'rgba(15,17,20,.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  const p = Math.min(splashTimer / SPLASH_DUR, 1);
+  const ease = 1 - Math.pow(1 - p, 3); // easeOut
+  const alpha = Math.min(1, ease * 1.5);
+  const scale = 0.92 + 0.08 * ease;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(W / 2, H / 2 - 24);
+  ctx.scale(scale, scale);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // 主标题：最醒目层级
+  ctx.fillStyle = '#f5f6f7';
+  ctx.font = '800 64px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('跳一跳', 0, -10);
+
+  // 署名小字
+  ctx.fillStyle = 'rgba(232,234,237,.55)';
+  ctx.font = '500 15px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('杨海鑫自制', 0, 42);
+
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawReadyOverlay() {
+  drawBackdrop();
+  const ch = 340;
+  const cy = drawCard(ch);
+
+  // 标题：置于卡片外、顶部居中，大字号加粗亮白；轻柔上下漂浮 + 呼吸缩放
+  const bob = Math.sin(readyTime * 1.6);
+  const titleY = cy - 50 + bob * 6;
+  const titleScale = 1 + bob * 0.03;
+  ctx.save();
+  ctx.translate(W / 2, titleY);
+  ctx.scale(titleScale, titleScale);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#f5f6f7';
+  ctx.font = '800 68px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('跳一跳', 0, 0);
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+  // 副标题：有成绩显示最佳，否则给一句轻提示（不再引导点击屏幕）
+  ctx.fillStyle = 'rgba(232,234,237,.55)';
+  ctx.font = '500 14px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(best > 0 ? '最佳 ' + best : '准备好就出发', W / 2, cy + 40);
+
+  // 皮肤 / 地图 / 商店 三个入口按钮竖排居中
+  const vGap = 10;
+  const btnW = 200, btnH = 36;
+  const colX = W / 2 - btnW / 2;
+  const colY = cy + 72;
+  skinBtn.w = btnW; mapBtn.w = btnW; shopBtn.w = btnW;
+  skinBtn.h = btnH; mapBtn.h = btnH; shopBtn.h = btnH;
+  skinBtn.x = colX; skinBtn.y = colY;
+  mapBtn.x = colX; mapBtn.y = colY + btnH + vGap;
+  shopBtn.x = colX; shopBtn.y = colY + 2 * (btnH + vGap);
+  drawButton(skinBtn, '皮肤', false);
+  drawButton(mapBtn, '地图', false);
+  drawButton(shopBtn, '商店', false);
+
+  // 累计持有金币（居中展示，后续用于购买皮肤 / 道具）
+  const clabel = '持有 ' + totalCoins;
+  ctx.font = '500 13px -apple-system, Helvetica, Arial, sans-serif';
+  const ctw = ctx.measureText(clabel).width;
+  const iy = cy + 224, ir = 7;
+  const groupW = ir * 2 + 4 + ctw;
+  const gx = W / 2 - groupW / 2;
+  const ix = gx + ir;
+  // 光晕
+  ctx.fillStyle = 'rgba(242,193,78,.15)';
+  ctx.beginPath();
+  ctx.arc(ix, iy, ir + 3, 0, Math.PI * 2);
+  ctx.fill();
+  // 币体
+  ctx.fillStyle = '#f2c14e';
+  ctx.beginPath();
+  ctx.arc(ix, iy, ir, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#c98f22';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // 内圈
+  ctx.strokeStyle = 'rgba(184,127,28,.55)';
+  ctx.beginPath();
+  ctx.arc(ix, iy, ir * 0.55, 0, Math.PI * 2);
+  ctx.stroke();
+  // 高光
+  ctx.fillStyle = 'rgba(255,255,255,.5)';
+  ctx.beginPath();
+  ctx.arc(ix - 2, iy - 2, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(232,234,237,.6)';
+  ctx.fillText(clabel, ix + ir + 4, iy + 5);
+  ctx.textAlign = 'center';
+
+  // 主开始按钮：主页唯一开局入口，点卡片空白不会开局
+  startBtn.w = 200; startBtn.h = 46;
+  startBtn.x = W / 2 - 100; startBtn.y = cy + 268;
+  drawButton(startBtn, '开始跳一跳', true);
+
+  // 右下角设置齿轮（卡片外）
+  const gcx = W - 28, gcy = H - 28, gr = 18;
+  gearBtn.x = gcx - gr; gearBtn.y = gcy - gr; gearBtn.w = gr * 2; gearBtn.h = gr * 2;
+  drawGear(gcx, gcy, gr);
+}
+
+// 齿轮图标：半透明圆底 + 八齿 + 中心孔
+function drawGear(cx, cy, r) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,.08)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(232,234,237,.5)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // 齿
+  ctx.fillStyle = 'rgba(232,234,237,.6)';
+  for (let k = 0; k < 8; k++) {
+    const a = k * Math.PI / 4;
+    ctx.save();
+    ctx.translate(cx + Math.cos(a) * (r - 2), cy + Math.sin(a) * (r - 2));
+    ctx.rotate(a);
+    ctx.fillRect(-2, -3, 4, 6);
+    ctx.restore();
+  }
+  // 中心孔
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(40,48,58,.9)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawShopOverlay() {
+  drawBackdrop();
+  const ch = 300;
+  const cy = drawCard(ch);
+  const s = skins[SHOP_SKIN_INDEX];
+  const has = isOwned(SHOP_SKIN_INDEX);
+  const affordable = totalCoins >= s.price;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '700 24px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('商店', W / 2, cy + 46);
+  ctx.fillStyle = 'rgba(232,234,237,.5)';
+  ctx.font = '500 13px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('持有 ' + totalCoins + ' 金币', W / 2, cy + 74);
+
+  // 商品预览：迷你小人
+  const pw = 34, ph = 44;
+  const px = W / 2 - pw / 2;
+  const py = cy + 92;
+  const headH = 15;
+  // 腿与鞋
+  ctx.fillStyle = s.body;
+  ctx.fillRect(px + 4, py + ph - 12, 10, 12);
+  ctx.fillRect(px + pw - 14, py + ph - 12, 10, 12);
+  ctx.fillStyle = s.shoe;
+  ctx.fillRect(px + 2, py + ph - 5, 12, 5);
+  ctx.fillRect(px + pw - 14, py + ph - 5, 12, 5);
+  // 躯干
+  ctx.fillStyle = s.body;
+  ctx.fillRect(px, py + headH, pw, ph - headH - 12);
+  // 头
+  ctx.fillStyle = s.head;
+  ctx.fillRect(px, py, pw, headH);
+  // 帽子
+  ctx.fillStyle = s.accent;
+  ctx.fillRect(px, py, pw, 5);
+  ctx.fillRect(px + pw - 3, py + 2, 10, 4);
+  // 眼睛
+  ctx.fillStyle = '#14161a';
+  ctx.fillRect(px + pw - 11, py + 8, 6, 6);
+
+  // 名称
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '600 17px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(s.name, W / 2, cy + 156);
+
+  // 价格行：金币图标 + 价格
+  const priceLabel = has ? '已拥有' : (affordable ? s.price + ' 金币' : '金币不足');
+  const pr = 8;
+  const ptw = ctx.measureText(priceLabel).width;
+  const rowW = ptw + 4 + pr * 2;
+  const rx = W / 2 - rowW / 2;
+  const ry = cy + 184;
+  if (!has) {
+    ctx.fillStyle = '#f2c14e';
+    ctx.beginPath();
+    ctx.arc(rx + pr, ry - 4, pr, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#c98f22';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.textAlign = 'left';
+  ctx.fillStyle = has ? 'rgba(232,234,237,.45)' : 'rgba(232,234,237,.7)';
+  ctx.font = '500 14px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(priceLabel, rx + pr * 2 + 4, ry);
+  ctx.textAlign = 'center';
+
+  // 购买按钮（已拥有 / 不足时置灰，不可点）
+  buyBtn.w = 150; buyBtn.h = 42;
+  buyBtn.x = W / 2 - 75; buyBtn.y = cy + 210;
+  const buyLabel = has ? '已拥有' : (affordable ? '购买' : '金币不足');
+  drawButton(buyBtn, buyLabel, !has && affordable);
+  if (has || !affordable) {
+    ctx.fillStyle = 'rgba(15,17,20,.35)';
+    roundRect(buyBtn.x, buyBtn.y, buyBtn.w, buyBtn.h, 12);
+    ctx.fill();
+  }
+
+  // 返回主页
+  shopBackBtn.w = 150; shopBackBtn.h = 38;
+  shopBackBtn.x = W / 2 - 75; shopBackBtn.y = cy + 256;
+  drawButton(shopBackBtn, '返回', false);
+}
+
+function drawSkinsOverlay() {
+  drawBackdrop();
+  const ch = 300;
+  const cy = drawCard(ch);
+  skinSlots.length = 0;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '700 24px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('皮肤', W / 2, cy + 46);
+  ctx.fillStyle = 'rgba(232,234,237,.5)';
+  ctx.font = '500 13px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('持有 ' + totalCoins + ' 金币', W / 2, cy + 74);
+
+  const cardW = 96, cardH = 150, gap = 18;
+  const totalW = skins.length * cardW + (skins.length - 1) * gap;
+  const startX = W / 2 - totalW / 2;
+  const cardY = cy + 100;
+
+  skins.forEach((s, i) => {
+    const x = startX + i * (cardW + gap);
+    const has = isOwned(i);
+    const selected = i === skinIndex;
+
+    // 卡片底
+    ctx.fillStyle = selected ? 'rgba(255,255,255,.12)' : 'rgba(255,255,255,.05)';
+    roundRect(x, cardY, cardW, cardH, 14);
+    ctx.fill();
+    if (selected) {
+      ctx.strokeStyle = 'rgba(232,234,237,.85)';
+      ctx.lineWidth = 2;
+      roundRect(x, cardY, cardW, cardH, 14);
+      ctx.stroke();
+    }
+
+    // 预览小人
+    const pw = 30, ph = 38;
+    const px = x + cardW / 2 - pw / 2, py = cardY + 20, headH = 14;
+    ctx.save();
+    if (!has) ctx.globalAlpha = 0.35;
+    ctx.fillStyle = s.body;
+    ctx.fillRect(px + 4, py + ph - 11, 10, 11);
+    ctx.fillRect(px + pw - 14, py + ph - 11, 10, 11);
+    ctx.fillStyle = s.shoe;
+    ctx.fillRect(px + 2, py + ph - 5, 12, 5);
+    ctx.fillRect(px + pw - 14, py + ph - 5, 12, 5);
+    ctx.fillStyle = s.body;
+    ctx.fillRect(px, py + headH, pw, ph - headH - 11);
+    ctx.fillStyle = s.head;
+    ctx.fillRect(px, py, pw, headH);
+    ctx.fillStyle = s.accent;
+    ctx.fillRect(px, py, pw, 5);
+    ctx.fillRect(px + pw - 3, py + 2, 10, 4);
+    ctx.fillStyle = '#14161a';
+    ctx.fillRect(px + pw - 11, py + 7, 6, 6);
+    ctx.restore();
+
+    // 未拥有：锁标盖在小人中央
+    if (!has) {
+      const lx = x + cardW / 2, ly = py + ph / 2;
+      ctx.strokeStyle = 'rgba(232,234,237,.9)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(lx, ly - 3, 4, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(232,234,237,.9)';
+      roundRect(lx - 5.5, ly - 3, 11, 9, 2);
+      ctx.fill();
+    }
+
+    // 名称
+    ctx.fillStyle = '#e8eaed';
+    ctx.font = '600 15px -apple-system, Helvetica, Arial, sans-serif';
+    ctx.fillText(s.name, x + cardW / 2, cardY + 86);
+
+    // 状态标签
+    let label, lc;
+    if (selected) { label = '使用中'; lc = 'rgba(232,234,237,.85)'; }
+    else if (has) { label = '已拥有'; lc = 'rgba(232,234,237,.45)'; }
+    else { label = s.price + ' 金币'; lc = totalCoins >= s.price ? '#f2c14e' : 'rgba(232,234,237,.4)'; }
+    ctx.fillStyle = lc;
+    ctx.font = '500 12px -apple-system, Helvetica, Arial, sans-serif';
+    ctx.fillText(label, x + cardW / 2, cardY + 116);
+
+    skinSlots.push({ x, y: cardY, w: cardW, h: cardH, index: i });
+  });
+
+  // 返回主页
+  skinBackBtn.w = 150; skinBackBtn.h = 38;
+  skinBackBtn.x = W / 2 - 75; skinBackBtn.y = cy + 256;
+  drawButton(skinBackBtn, '返回', false);
+}
+
+function drawMapsOverlay() {
+  drawBackdrop();
+  const ch = 300;
+  const cy = drawCard(ch);
+  mapSlots.length = 0;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '700 24px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('地图', W / 2, cy + 46);
+  ctx.fillStyle = 'rgba(232,234,237,.5)';
+  ctx.font = '500 13px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('选择场景，雨天需兑换', W / 2, cy + 74);
+
+  const cardW = 104, cardH = 150, gap = 12;
+  const totalW = MAPS.length * cardW + (MAPS.length - 1) * gap;
+  const startX = W / 2 - totalW / 2;
+  const cardY = cy + 100;
+
+  MAPS.forEach((m, i) => {
+    const x = startX + i * (cardW + gap);
+    const owned = isMapOwned(i);
+    const selected = i === mapIndex;
+
+    // 卡片底
+    ctx.fillStyle = selected ? 'rgba(255,255,255,.12)' : 'rgba(255,255,255,.05)';
+    roundRect(x, cardY, cardW, cardH, 14);
+    ctx.fill();
+    if (selected) {
+      ctx.strokeStyle = 'rgba(232,234,237,.85)';
+      ctx.lineWidth = 2;
+      roundRect(x, cardY, cardW, cardH, 14);
+      ctx.stroke();
+    }
+
+    // 缩略背景预览
+    const pw = 72, ph = 42;
+    const px = x + cardW / 2 - pw / 2, py = cardY + 16;
+    ctx.save();
+    if (!owned) ctx.globalAlpha = 0.4;
+    const g = ctx.createLinearGradient(0, py, 0, py + ph);
+    g.addColorStop(0, m.sky[0]);
+    g.addColorStop(1, m.sky[1]);
+    ctx.fillStyle = g;
+    roundRect(px, py, pw, ph, 8);
+    ctx.fill();
+    // 地面条
+    ctx.fillStyle = m.ground[0];
+    ctx.fillRect(px, py + ph - 10, pw, 10);
+    // 白天太阳 / 黑夜月亮 / 雨天雨丝
+    if (m.day) {
+      ctx.fillStyle = '#ffd95e';
+      ctx.beginPath();
+      ctx.arc(px + pw - 16, py + 12, 7, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (m.rain) {
+      ctx.strokeStyle = 'rgba(220,230,235,.7)';
+      ctx.lineWidth = 1;
+      for (let k = 0; k < 4; k++) {
+        const rx = px + 14 + k * 14;
+        ctx.beginPath();
+        ctx.moveTo(rx, py + 8);
+        ctx.lineTo(rx - 3, py + 20);
+        ctx.stroke();
+      }
+    } else {
+      ctx.fillStyle = 'rgba(232,234,237,.8)';
+      ctx.beginPath();
+      ctx.arc(px + pw - 16, py + 12, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(40,48,58,.8)';
+      ctx.beginPath();
+      ctx.arc(px + pw - 13, py + 10, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // 未拥有：锁标盖在预览中央
+    if (!owned) {
+      const lx = x + cardW / 2, ly = py + ph / 2;
+      ctx.strokeStyle = 'rgba(232,234,237,.9)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(lx, ly - 3, 4, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(232,234,237,.9)';
+      roundRect(lx - 5.5, ly - 3, 11, 9, 2);
+      ctx.fill();
+    }
+
+    // 名称
+    ctx.fillStyle = '#e8eaed';
+    ctx.font = '600 15px -apple-system, Helvetica, Arial, sans-serif';
+    ctx.fillText(m.name, x + cardW / 2, cardY + 82);
+
+    // 状态标签
+    let label, lc;
+    if (selected) { label = '使用中'; lc = 'rgba(232,234,237,.85)'; }
+    else if (owned) { label = '点击切换'; lc = 'rgba(232,234,237,.45)'; }
+    else { label = m.price + ' 金币'; lc = totalCoins >= m.price ? '#f2c14e' : 'rgba(232,234,237,.4)'; }
+    ctx.fillStyle = lc;
+    ctx.font = '500 12px -apple-system, Helvetica, Arial, sans-serif';
+    ctx.fillText(label, x + cardW / 2, cardY + 108);
+
+    mapSlots.push({ x, y: cardY, w: cardW, h: cardH, index: i });
+  });
+
+  // 返回主页
+  mapBackBtn.w = 150; mapBackBtn.h = 38;
+  mapBackBtn.x = W / 2 - 75; mapBackBtn.y = cy + 256;
+  drawButton(mapBackBtn, '返回', false);
+}
+
+function drawSettingsOverlay() {
+  drawBackdrop();
+  const ch = 260;
+  const cy = drawCard(ch);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '700 24px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('设置', W / 2, cy + 44);
+
+  // 兑换码按钮
+  redeemBtn.w = 200; redeemBtn.h = 40;
+  redeemBtn.x = W / 2 - 100; redeemBtn.y = cy + 96;
+  drawButton(redeemBtn, '兑换码', false);
+
+  // 最近一次兑换结果提示
+  if (redeemMsg) {
+    const ok = redeemMsg.indexOf('成功') === 0;
+    ctx.fillStyle = ok ? '#f2c14e' : 'rgba(232,234,237,.55)';
+    ctx.font = '500 14px -apple-system, Helvetica, Arial, sans-serif';
+    ctx.fillText(redeemMsg, W / 2, cy + 150);
+  }
+
+  // 返回主页
+  settingsBackBtn.w = 150; settingsBackBtn.h = 38;
+  settingsBackBtn.x = W / 2 - 75; settingsBackBtn.y = cy + 200;
+  drawButton(settingsBackBtn, '返回', false);
+
+  // 兑换码浮层面板（自绘 + 隐藏 input 接收软键盘）
+  if (redeemOpen) {
+    ctx.fillStyle = 'rgba(15,17,20,.55)';
+    ctx.fillRect(0, 0, W, H);
+
+    const pw = W - 64, ph = 210, px = 32, py = H / 2 - ph / 2;
+    ctx.fillStyle = 'rgba(30,35,42,.95)';
+    roundRect(px, py, pw, ph, 22);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.14)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#e8eaed';
+    ctx.font = '700 20px -apple-system, Helvetica, Arial, sans-serif';
+    ctx.fillText('兑换码', W / 2, py + 36);
+
+    // 输入框：由真实可见 input 占据该区域（边框/背景/占位/文字均由 input 呈现），canvas 只负责定位
+    codeField.w = 270; codeField.h = 44;
+    codeField.x = W / 2 - 135; codeField.y = py + 62;
+
+    // 确认 / 取消
+    const bw = 120, bh = 38, bgap = 16;
+    const bx = W / 2 - bw - bgap / 2;
+    redeemConfirmBtn.w = bw; redeemConfirmBtn.h = bh;
+    redeemConfirmBtn.x = bx; redeemConfirmBtn.y = py + 132;
+    redeemCancelBtn.w = bw; redeemCancelBtn.h = bh;
+    redeemCancelBtn.x = bx + bw + bgap; redeemCancelBtn.y = py + 132;
+    drawButton(redeemConfirmBtn, '确认', true);
+    drawButton(redeemCancelBtn, '取消', false);
+
+    if (redeemMsg) {
+      const ok = redeemMsg.indexOf('成功') === 0;
+      ctx.fillStyle = ok ? '#f2c14e' : 'rgba(232,234,237,.55)';
+      ctx.font = '500 13px -apple-system, Helvetica, Arial, sans-serif';
+      ctx.fillText(redeemMsg, W / 2, py + 184);
+    }
+    placeCodeInput();
+  }
+}
+
+function drawDeadOverlay() {
+  drawBackdrop();
+  const ch = 284;
+  const cy = drawCard(ch);
+  ctx.textAlign = 'center';
+  // 层级：游戏结束 → 本局分数 → 最佳分数 → 两个按钮
+  ctx.fillStyle = 'rgba(232,234,237,.7)';
+  ctx.font = '600 15px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('游戏结束', W / 2, cy + 50);
+  ctx.fillStyle = '#e8eaed';
+  ctx.font = '700 40px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText(String(score), W / 2, cy + 106);
+  ctx.fillStyle = 'rgba(232,234,237,.5)';
+  ctx.font = '500 13px -apple-system, Helvetica, Arial, sans-serif';
+  ctx.fillText('最佳 ' + best, W / 2, cy + 144);
+
+  const bw = 120, bh = 42, gap = 14;
+  deadHomeBtn.w = bw; deadHomeBtn.h = bh;
+  deadHomeBtn.x = W / 2 - bw - gap / 2; deadHomeBtn.y = cy + 190;
+  deadRestartBtn.w = bw; deadRestartBtn.h = bh;
+  deadRestartBtn.x = W / 2 + gap / 2; deadRestartBtn.y = cy + 190;
+  drawButton(deadHomeBtn, '返回主页', false);
+  drawButton(deadRestartBtn, '重新开始', true);
+}
+
+function drawSkinPicker(y) {
+  skinDots.length = 0;
+  const gap = 38;
+  const startX = W / 2 - ((skins.length - 1) * gap) / 2;
+  skins.forEach((s, i) => {
+    const x = startX + i * gap;
+    const has = isOwned(i);
+    if (i === skinIndex) {
+      ctx.strokeStyle = 'rgba(232,234,237,.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, 16, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    const dotR = pressedDot === i ? 9 : 11;
+    ctx.save();
+    if (!has) ctx.globalAlpha = 0.32;
+    ctx.fillStyle = s.body;
+    ctx.beginPath();
+    ctx.arc(x, y, dotR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    if (!has) {
+      // 小锁标记
+      ctx.strokeStyle = 'rgba(232,234,237,.85)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(x, y - 2, 3, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(232,234,237,.85)';
+      roundRect(x - 4.5, y - 2, 9, 7, 2);
+      ctx.fill();
+    }
+    skinDots.push({ x, y, r: 16, index: i });
+  });
+}
+
+function drawPlayer() {
+  const s = skins[skinIndex];
+  const px = player.x;
+  const py = player.y - player.h;
+  const headH = 18;
+  const bodyH = player.h - headH - 10;
+
+  // 受击无敌期：按节奏闪烁
+  ctx.save();
+  if (invuln > 0) {
+    const blink = Math.floor(invuln * 10) % 2 === 0;
+    ctx.globalAlpha = blink ? 1 : 0.35;
+  }
+
+  // 腿（跑步摆动）
+  ctx.fillStyle = s.body;
+  if (player.onGround) {
+    const leg = Math.sin(player.runFrame) > 0 ? 1 : -1;
+    ctx.fillRect(px + 5, py + player.h - 10, 10, 10 + leg * 3);
+    ctx.fillRect(px + player.w - 15, py + player.h - 10, 10, 10 - leg * 3);
+  } else {
+    ctx.fillRect(px + 5, py + player.h - 10, 10, 8);
+    ctx.fillRect(px + player.w - 15, py + player.h - 10, 10, 8);
+  }
+  // 鞋
+  ctx.fillStyle = s.shoe;
+  ctx.fillRect(px + 3, py + player.h - 4, 12, 4);
+  ctx.fillRect(px + player.w - 15, py + player.h - 4, 12, 4);
+
+  // 躯干
+  ctx.fillStyle = s.body;
+  ctx.fillRect(px, py + headH, player.w, bodyH);
+  ctx.fillStyle = 'rgba(0,0,0,.10)';
+  ctx.fillRect(px + player.w - 8, py + headH, 8, bodyH);
+
+  // 头
+  ctx.fillStyle = s.head;
+  ctx.fillRect(px, py, player.w, headH);
+
+  // 帽子（accent 色，帽檐朝右）
+  ctx.fillStyle = s.accent;
+  ctx.fillRect(px, py, player.w, 6);
+  ctx.fillRect(px + player.w - 4, py + 2, 10, 4);
+
+  // 眼睛
+  ctx.fillStyle = '#14161a';
+  ctx.fillRect(px + player.w - 12, py + 10, 6, 6);
+
+  ctx.restore();
+}
+
+initScenery();
+reset();
+state = 'splash';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
